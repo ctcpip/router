@@ -1,0 +1,137 @@
+name: Browserify Router and Correct Smoke Test
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        node-version: [18.x]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Browserify the Router library
+        run: |
+          npm install -g browserify
+          mkdir -p dist
+          # Browserify the router source code
+          browserify index.js --standalone Router > dist/router.bundle.js
+
+      - name: Create a dynamic HTML smoke test
+        run: |
+          echo "<!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset='utf-8'>
+            <title>Router Smoke Test</title>
+            <script src='./router.bundle.js'></script>
+            <script>
+              window.onload = function() {
+                try {
+                  // Instantiate the Router
+                  var router = new Router();
+
+                  // Define a simple GET route
+                  router.get('/test', function(req, res) {
+                    res.end('Route works!');
+                  });
+
+                  // Create a mock request and response objects
+                  var req = { method: 'GET', url: '/test' };
+                  var res = {
+                    end: function(message) {
+                      // If the message is correct, show success
+                      if (message === 'Route works!') {
+                        document.body.innerHTML = '<h1 id=\"success\">Router works in the browser!</h1>';
+                      } else {
+                        throw new Error('Unexpected response message');
+                      }
+                    }
+                  };
+
+                  // Pass the mock request/response to the router
+                  router.handle(req, res, function(err) {
+                    if (err) throw new Error('Route handling failed: ' + err.message);
+                  });
+                } catch (e) {
+                  // Mark test as failed and log error message
+                  document.body.innerHTML = '<h1 id=\"failure\">Router test failed: ' + e.message + '</h1>';
+                  console.error(e);
+                }
+              };
+            </script>
+          </head>
+          <body>
+            <h1>Testing Router...</h1>
+          </body>
+          </html>" > dist/test-runner.html
+
+      - name: Set up XVFB for headless browser tests
+        run: |
+          sudo apt-get install -y xvfb
+          export DISPLAY=:99.0
+          Xvfb :99 -screen 0 1024x768x16 &
+
+      - name: Install Puppeteer
+        run: npm install puppeteer
+
+      - name: Run smoke test in a headless browser with Puppeteer
+        run: |
+          node -e "
+            const puppeteer = require('puppeteer');
+            (async () => {
+              const browser = await puppeteer.launch();
+              const page = await browser.newPage();
+              await page.goto('file://$(pwd)/dist/test-runner.html');
+
+              // Wait for the success or failure message
+              await page.waitForSelector('#success, #failure', { timeout: 5000 });
+
+              // Check for success or failure messages without using $
+              const message = await page.evaluate(() => {
+                const successMessage = document.getElementById('success');
+                const failureMessage = document.getElementById('failure');
+                if (successMessage) return 'success';
+                if (failureMessage) return 'failure: ' + failureMessage.textContent;
+                return 'none';
+              });
+
+              if (message.startsWith('failure')) {
+                console.error('Smoke test failed:', message);
+                process.exit(1);
+              }
+
+              if (message === 'none') {
+                console.error('Smoke test failed: No success message found');
+                process.exit(1);
+              }
+
+              console.log('Smoke test passed: Router works in the browser!');
+              await browser.close();
+            })();
+          "
+
+      - name: Upload Test Artifacts (in case of test failures)
+        if: failure()
+        uses: actions/upload-artifact@v3
+        with:
+          name: test-results
+          path: dist
